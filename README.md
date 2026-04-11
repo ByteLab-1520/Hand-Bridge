@@ -214,6 +214,6 @@ Pillow       10+
 
 ## ░░ License
 
-MIT © 2025 — See [LICENSE](LICENSE)
+MIT © 2026 — See [LICENSE](LICENSE)
 
 ---
