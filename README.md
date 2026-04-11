@@ -25,7 +25,6 @@
 > *We look forward to a day when people, each a little different, can all shine together through sign language.*
 
 ---
----
 
 ## ░░ What is Hand-Bridge?
 
