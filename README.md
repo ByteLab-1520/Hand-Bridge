@@ -18,7 +18,13 @@
 [![License](https://img.shields.io/badge/License-MIT-00ff88?style=flat-square)](LICENSE)
 
 </div>
+---
 
+## 🌱 Vision
+
+> *We look forward to a day when people, each a little different, can all shine together through sign language.*
+
+---
 ---
 
 ## ░░ What is Hand-Bridge?
