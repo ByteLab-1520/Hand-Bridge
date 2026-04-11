@@ -37,15 +37,6 @@ It runs **entirely on your machine** — no internet, no cloud API, no GPU neede
 
 ---
 
-## ░░ Screenshots
-
-> _Add your screenshots here_
-
-| Translator | Data Collector | Trainer |
-|:---:|:---:|:---:|
-| ![translator](docs/translator.png) | ![collector](docs/collector.png) | ![trainer](docs/trainer.png) |
-
----
 
 ## ░░ How It Works
 
