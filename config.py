@@ -24,7 +24,7 @@ HAND_LANDMARKS = 21
 COORDS_PER_LANDMARK = 3
 MAX_HANDS = 2
 # MediaPipe confidence thresholds
-DETECTION_CONFIDENCE = 0.7
+DETECTION_CONFIDENCE = 0.65
 TRACKING_CONFIDENCE = 0.7
 
 # Camera settings
@@ -32,7 +32,7 @@ CAMERA_INDEX = 0
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 
-# Key face landmark indices for expression recognition (22 points)
+# Key face landmark indices for expression recognition (24 points)
 # Covers mouth, eyebrows, eyes, nose, and cheeks
 KEY_FACE_INDICES = [
     # Mouth
@@ -46,35 +46,39 @@ KEY_FACE_INDICES = [
     # Cheeks
     234, 454,
 ]
-NUM_KEY_FACE = len(KEY_FACE_INDICES)  # 22
+NUM_KEY_FACE = len(KEY_FACE_INDICES)  # 24
 
 # Upper body pose landmark indices (MediaPipe Pose 0–16)
 POSE_INDICES = list(range(17))
 NUM_KEY_POSE = len(POSE_INDICES)  # 17
 
 # Total features per frame:
-#   hands 126  +  key face 66  +  upper body pose 51  =  243
+#   hands 126  +  key face 72  +  upper body pose 51  =  249
 NUM_FEATURES = (
     HAND_LANDMARKS * COORDS_PER_LANDMARK * MAX_HANDS  # 126
-    + NUM_KEY_FACE * COORDS_PER_LANDMARK              # 66
+    + NUM_KEY_FACE * COORDS_PER_LANDMARK              # 72
     + NUM_KEY_POSE * COORDS_PER_LANDMARK              # 51
-)  # = 243
+)  # = 249
 
 # Model architecture
 LSTM_UNITS_1 = 128
 LSTM_UNITS_2 = 64
 DENSE_UNITS = 64
-DROPOUT_RATE = 0.4
+DROPOUT_RATE = 0.20  # 작은 데이터셋에서 confidence가 눌리지 않도록 낮게 유지
+L2_REGULARIZATION = 0.00001  # 과한 정규화 방지
 
 # Training settings
-EPOCHS = 100
-BATCH_SIZE = 32
-VALIDATION_SPLIT = 0.15
-EARLY_STOPPING_PATIENCE = 20
+EPOCHS = 150  # 최대 에포크
+BATCH_SIZE = 16  # 배치 크기 감소 (32 → 16) - 더 정교한 그래디언트
+VALIDATION_SPLIT = 0.20  # 검증 데이터 비율 증가 (15% → 20%)
+EARLY_STOPPING_PATIENCE = 15  # 조기 종료 patience 감소 (20 → 15) - 과적합 방지
 
 # Inference settings
-PREDICTION_THRESHOLD = 0.55   # minimum confidence to display prediction
-STABLE_FRAMES = 10            # frames prediction must be stable before showing
+PREDICTION_THRESHOLD = 0.70   # minimum confidence (0.80 → 0.70, 균형잡힌 값)
+STABLE_FRAMES = 10            # frames to stabilize (15 → 10, 더 빠른 인식)
+MIN_GESTURE_MOTION = 0.0020   # 손이 가만히 있을 때 오인식 방지용 평균 프레임 변화량
+MIN_GESTURE_DISPLACEMENT = 0.025  # 시작-끝 손 좌표 변화량
+INACTIVITY_CLEAR_SECONDS = 3.0  # 번역 결과 자동 초기화 대기 시간
 
 # Capture modes — determines which body parts are extracted as features
 CAPTURE_TWO_HANDS = "두 손"        # both hands only (face/body zeroed)

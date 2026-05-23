@@ -5,8 +5,9 @@ Usage:
     python data_collector.py
 
 Controls (while the OpenCV window is focused):
-    SPACE   — start recording the next sequence
-    D       — done with current label, add a new one
+    SPACE   — start/pause/resume recording
+    P       — pause/resume recording
+    C       — cancel current sequence and discard collected frames
     Q       — quit
 """
 
@@ -76,11 +77,14 @@ def collect_sequences(
 
     while saved < num_sequences:
         seq_idx = start_idx + saved
-        state = 'waiting'  # waiting | countdown | recording
+        state = 'waiting'  # waiting | waiting_hand | countdown | recording | paused
 
         countdown_start = 0.0
         sequence: list[np.ndarray] = []
         frame_count = 0
+        no_hand_count = 0  # Track consecutive frames without hand detection
+        MIN_FRAMES = 20    # Minimum frames to collect before allowing early termination
+        MAX_NO_HAND_FRAMES = 90  # ~3초 손 미인식 (30fps * 3초)
 
         while True:
             ret, frame = cap.read()
@@ -94,6 +98,7 @@ def collect_sequences(
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = detector.process(rgb)
             frame = draw_landmarks(frame, results)
+            has_hands = results.hand_detected
 
             now = time.time()
 
@@ -105,44 +110,111 @@ def collect_sequences(
                 )
                 frame = put_korean_text(
                     frame,
-                    "SPACE: 녹화 시작  |  Q: 종료",
+                    "SPACE: 시작  |  Q: 종료",
                     (10, 65), font_size=22, color=(255, 255, 0),
                 )
 
-            elif state == 'countdown':
-                elapsed = now - countdown_start
-                remaining = 3 - int(elapsed)
-                if remaining <= 0:
-                    state = 'recording'
-                    sequence = []
-                    frame_count = 0
+            elif state == 'waiting_hand':
+                if has_hands:
+                    state = 'countdown'
+                    countdown_start = time.time()
                 else:
                     frame = put_korean_text(
                         frame,
-                        str(remaining),
-                        (w // 2 - 20, h // 2 - 40),
-                        font_size=80, color=(0, 0, 255), bg_color=None,
+                        "손을 카메라에 보여주세요",
+                        (10, 20), font_size=28, color=(255, 165, 0),
+                    )
+                    frame = put_korean_text(
+                        frame,
+                        "손 인식 후 3초 뒤 녹화 시작",
+                        (10, 65), font_size=22, color=(255, 255, 0),
                     )
 
+            elif state == 'countdown':
+                if not has_hands:
+                    state = 'waiting_hand'
+                else:
+                    elapsed = now - countdown_start
+                    remaining = 3 - int(elapsed)
+                    if remaining <= 0:
+                        state = 'recording'
+                        sequence = []
+                        frame_count = 0
+                        no_hand_count = 0
+                    else:
+                        frame = put_korean_text(
+                            frame,
+                            str(remaining),
+                            (w // 2 - 20, h // 2 - 40),
+                            font_size=80, color=(0, 0, 255), bg_color=None,
+                        )
+
             elif state == 'recording':
-                landmarks = extract_landmarks(results)
-                sequence.append(landmarks)
-                frame_count += 1
+                if has_hands:
+                    # 손이 감지됨 - 카운터 초기화
+                    no_hand_count = 0
+                else:
+                    # 손이 감지되지 않음 - 카운터 증가
+                    no_hand_count += 1
+                    
+                    # 90 프레임 이상 손이 없으면 조기 종료
+                    if no_hand_count >= MAX_NO_HAND_FRAMES:
+                        print(f"  [CANCEL] {label}/{seq_idx}.npy discarded (손 인식 없음 3초 초과)")
+                        sequence = []
+                        frame_count = 0
+                        no_hand_count = 0
+                        state = 'canceled'
+                
+                # 손이 감지된 경우에만 프레임 저장
+                if has_hands:
+                    landmarks = extract_landmarks(results)
+                    sequence.append(landmarks)
+                    frame_count += 1
 
                 # Progress bar
                 progress = int(frame_count / SEQUENCE_LENGTH * w)
                 cv2.rectangle(frame, (0, h - 18), (progress, h), (0, 255, 0), -1)
-                frame = put_korean_text(
-                    frame,
-                    f"녹화 중... {frame_count}/{SEQUENCE_LENGTH}",
-                    (10, 20), font_size=28, color=(0, 0, 255),
-                )
+                
+                # 손 없음 상태 표시
+                if no_hand_count > 0:
+                    remaining_frames = MAX_NO_HAND_FRAMES - no_hand_count
+                    frame = put_korean_text(
+                        frame,
+                        f"녹화 중... {frame_count}/{SEQUENCE_LENGTH}  (손 없음: {no_hand_count}/{MAX_NO_HAND_FRAMES})",
+                        (10, 20), font_size=24, color=(255, 165, 0),
+                    )
+                else:
+                    frame = put_korean_text(
+                        frame,
+                        f"녹화 중... {frame_count}/{SEQUENCE_LENGTH}",
+                        (10, 20), font_size=24, color=(0, 0, 255),
+                    )
 
                 if frame_count >= SEQUENCE_LENGTH:
                     np.save(os.path.join(label_dir, f"{seq_idx}.npy"), np.array(sequence))
-                    print(f"  [OK] {label}/{seq_idx}.npy saved")
+                    print(f"  [OK] {label}/{seq_idx}.npy saved (정상 완료: {frame_count} frames)")
                     saved += 1
                     state = 'saved'
+
+            elif state == 'paused':
+                frame = put_korean_text(
+                    frame,
+                    f"일시정지... {frame_count}/{SEQUENCE_LENGTH}",
+                    (10, 20), font_size=28, color=(255, 165, 0),
+                )
+                frame = put_korean_text(
+                    frame,
+                    "SPACE/P: 재개  |  C: 취소  |  Q: 종료",
+                    (10, 65), font_size=22, color=(255, 255, 0),
+                )
+
+            elif state == 'canceled':
+                frame = put_korean_text(
+                    frame, "시퀀스 취소됨", (10, 20), font_size=32, color=(255, 165, 0),
+                )
+                cv2.imshow('Sign Language Data Collector', frame)
+                cv2.waitKey(600)
+                break
 
             elif state == 'saved':
                 frame = put_korean_text(
@@ -156,8 +228,18 @@ def collect_sequences(
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord(' ') and state == 'waiting':
-                state = 'countdown'
-                countdown_start = time.time()
+                state = 'waiting_hand'
+            elif key in (ord(' '), ord('p')) and state == 'recording':
+                state = 'paused'
+            elif key in (ord(' '), ord('p')) and state == 'paused':
+                state = 'recording'
+                no_hand_count = 0
+            elif key == ord('c') and state in ('waiting_hand', 'countdown', 'recording', 'paused'):
+                print(f"  [CANCEL] {label}/{seq_idx}.npy discarded")
+                sequence = []
+                frame_count = 0
+                no_hand_count = 0
+                state = 'canceled'
             elif key == ord('q'):
                 return saved
 

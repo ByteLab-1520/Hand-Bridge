@@ -30,7 +30,7 @@ It runs **entirely on your machine** — no internet, no cloud API, no GPU neede
 |---|---|
 | 📷 | Webcam-based real-time translation |
 | 🤖 | LSTM model trained on your own data |
-| 🖐 | MediaPipe 21-point hand landmark tracking |
+| 🖐 | MediaPipe landmark tracking for hands, with optional face/body capture |
 | 🇰🇷 | Korean Sign Language (KSL / 한국수어) |
 | 🎮 | Pixel-art UI |
 | 💻 | Windows · macOS · Linux |
@@ -43,15 +43,17 @@ It runs **entirely on your machine** — no internet, no cloud API, no GPU neede
 ```
 ┌──────────┐    ┌─────────────┐    ┌──────────────┐    ┌─────────────┐
 │  Webcam  │───▶│  MediaPipe  │───▶│  LSTM Model  │───▶│ Korean Text │
-│  (live)  │    │ Hand Joints │    │  (30 frames) │    │   Output    │
+│  (live)  │    │ Landmarks   │    │  (30 frames) │    │   Output    │
 └──────────┘    └─────────────┘    └──────────────┘    └─────────────┘
-                  21 landmarks        126 features
-                  × 2 hands           per frame
+                  hands/face/body      249 features
+                  zero-padded          per frame
 ```
 
-1. **MediaPipe** detects 21 hand landmarks (x, y, z) for up to 2 hands → 126 features/frame
-2. A sliding window of **30 frames** is fed into an **LSTM** network
-3. The model outputs a Korean word when a stable prediction crosses the confidence threshold
+1. **MediaPipe** detects hand landmarks, and can optionally include selected face or upper-body pose landmarks
+2. Every frame is converted into a fixed **249-feature** vector; unused capture sections are zero-filled
+3. A sliding window of **30 frames** is fed into an **LSTM** network
+4. The model outputs a Korean word when a stable prediction crosses the confidence threshold
+5. If no meaningful input is detected for **3 seconds**, the translation box is cleared automatically
 
 ---
 
@@ -99,7 +101,17 @@ python video_importer.py            # auto import
 python train.py
 ```
 
-### 5. Run the Translator
+Training saves:
+
+```
+models/sign_model.keras
+models/labels.json
+models/training_history.png
+```
+
+`train.py` skips malformed `.npy` sequences, checks that at least two labels have enough valid data, and prints a short actionable error instead of a long traceback when data is insufficient.
+
+### 5. Run the GUI
 
 ```bash
 python gui.py
@@ -111,13 +123,13 @@ python gui.py
 
 ```
 ░░ Hand-Bridge  //  Real-time Korean Sign Language Translator ░░
-┌─────────────┬─────────────────────────────────────────────────┐
-│  [ MENU ]   │  [ CAMERA FEED ]                      30 FPS    │
-│             │  ┌────────────────────────────────────┐         │
-│ ▶ 번역기      │  │  live feed + hand landmark overlay │         │
-│   데이터      │  └────────────────────────────────────┘         │
-│   가져오기     │                                                 │
-│   학습        │  [ CURRENT SIGN ]   안녕하세요                     │
+┌─────────────┬──────────────────────────────────────────────────┐
+│  [ MENU ]  │  [ CAMERA FEED ]                      30 FPS      │
+│            │  ┌────────────────────────────────────┐           │
+│ ▶ 번역기     │  │  live feed + hand landmark overlay │           │
+│   데이터     │  └────────────────────────────────────┘           │
+│   가져오기    │                                                  │
+│   학습       │  [ CURRENT SIGN ]   안녕하세요                      │
 │             │  [ CONFIDENCE ]     ████████░░  87%              │
 │ v1.0 CPU    │  [ TRANSLATION ]    안녕하세요 감사합니다              │
 └─────────────┴──────────────────────────────────────────────────┘
@@ -132,6 +144,77 @@ python gui.py
 
 ---
 
+## ░░ Translator Behavior
+
+The translator is tuned for short live demonstrations:
+
+| Behavior | Current rule |
+|----------|--------------|
+| Input window | 30 frames |
+| Stable prediction | Same prediction for `STABLE_FRAMES` frames |
+| Confidence threshold | `PREDICTION_THRESHOLD` in `config.py` |
+| Static-hand filtering | Ignores frames with too little hand motion/displacement |
+| Auto clear | Clears `TRANSLATION` after 3 seconds with no hand or no meaningful motion |
+| Capture mode | Current trained models use `두 손` mode by default |
+
+Because the model is a softmax classifier, it will always choose one of the labels it was trained on. For better rejection of non-sign gestures, collect an extra label such as `모름` / `기타` with idle hands, transition poses, and random non-sign motion.
+
+---
+
+## ░░ Webcam Data Collection
+
+The `◉ 데이터 수집` tab records training data directly from the webcam.
+
+Current collection flow:
+
+1. Enter a Korean label and the number of sequences.
+2. Press `[ REC ] 녹화 시작`.
+3. The app waits until a hand is detected.
+4. Once a hand appears, a 3-second countdown starts.
+5. The sequence records only frames where a hand is detected.
+6. When 30 valid frames are collected, the sequence is saved.
+7. The next sequence again waits for hand detection before counting down.
+
+Controls while collecting:
+
+| Control | Action |
+|---------|--------|
+| `[ ⏸ ] 일시정지` | Pause/resume the current sequence |
+| `[ X ] 취소` | Discard the current sequence and retry it |
+| Auto cancel | If hands disappear for about 3 seconds during recording, the current partial sequence is discarded |
+
+The CLI collector has matching keyboard controls:
+
+| Key | Action |
+|-----|--------|
+| `SPACE` | Start / pause / resume |
+| `P` | Pause / resume |
+| `C` | Cancel the current sequence and discard collected frames |
+| `Q` | Quit |
+
+---
+
+## ░░ Utilities
+
+### Delete Training Data & Models
+
+Use `delete.py` to safely remove training data and/or models:
+
+```bash
+# Delete training data only (data/ folder)
+python delete.py
+
+# Delete both training data AND model
+python delete.py --all
+
+# Delete model only (keep training data)
+python delete.py --model-only
+```
+
+Each command will ask for confirmation before deletion (`yes/no`).
+
+---
+
 ## ░░ Project Structure
 
 ```
@@ -141,6 +224,7 @@ hand-bridge/
 ├── data_collector.py    ← CLI webcam collector
 ├── video_importer.py    ← MP4 → training data converter
 ├── train.py             ← Model training script
+├── delete.py            ← Data/model deletion utility
 ├── model.py             ← LSTM architecture
 ├── utils.py             ← Landmark extraction + Korean text rendering
 ├── config.py            ← All settings (camera, model, thresholds)
@@ -163,10 +247,13 @@ hand-bridge/
 | Background | Plain single-color wall |
 | Lighting | Bright, even, no backlight |
 | Distance | 50–80 cm from camera |
-| Clips per word | 30 minimum · 60+ recommended |
+| Sequences per word | 30 minimum · 50–100 recommended |
+| Rejection class | Add `모름` / `기타` with 80–100 idle or non-sign examples |
 
 **File naming:** `<word>_<name>_<number>.mp4`
 → e.g. `annyeong_jiseong_01.mp4`
+
+For live demos, start small: 5–8 signs plus one `모름` class is usually more reliable than adding many similar signs with too few examples.
 
 ---
 
@@ -214,6 +301,12 @@ Pillow       10+
 
 ## ░░ License
 
-MIT © 2026 — See [LICENSE](LICENSE)
+MIT © 2025 — See [LICENSE](LICENSE)
 
 ---
+
+<div align="center">
+
+**Hand-Bridge** — _Connecting hands to words._
+
+</div>

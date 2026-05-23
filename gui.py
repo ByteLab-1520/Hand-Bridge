@@ -25,6 +25,7 @@ import config  # CUDA/Metal 비활성화 env vars
 from config import (
     CAMERA_INDEX, DETECTION_CONFIDENCE, TRACKING_CONFIDENCE,
     SEQUENCE_LENGTH, NUM_FEATURES, STABLE_FRAMES, PREDICTION_THRESHOLD,
+    MIN_GESTURE_MOTION, MIN_GESTURE_DISPLACEMENT, INACTIVITY_CLEAR_SECONDS,
     MODEL_PATH, LABELS_PATH, DATA_DIR, NUM_SEQUENCES,
     CAPTURE_MODES, DEFAULT_CAPTURE_MODE,
     CAPTURE_TWO_HANDS, CAPTURE_WITH_FACE, CAPTURE_WITH_BODY, CAPTURE_ONE_HAND,
@@ -156,12 +157,6 @@ class CameraWorker(threading.Thread):
             results = detector.process(rgb)
             lm      = extract_landmarks(results, capture_mode=self.capture_mode)
             ann     = draw_landmarks(frame.copy(), results)
-            # Center crosshair
-            fh, fw = ann.shape[:2]
-            cx, cy, arm = fw // 2, fh // 2, 24
-            _cross_color = (0, 255, 136)  # neon green (BGR)
-            cv2.line(ann, (cx - arm, cy), (cx + arm, cy), _cross_color, 1, cv2.LINE_AA)
-            cv2.line(ann, (cx, cy - arm), (cx, cy + arm), _cross_color, 1, cv2.LINE_AA)
             disp    = cv2.cvtColor(cv2.resize(ann, (CAM_W, CAM_H)), cv2.COLOR_BGR2RGB)
             try:
                 self.out_q.put_nowait((disp, lm, results.hand_detected))
@@ -229,12 +224,14 @@ class TranslatorPage(ctk.CTkFrame):
         self._q: queue.Queue   = queue.Queue(maxsize=2)
         self._stop = threading.Event()
         self._model = None
+        self._model_mtime: float | None = None
         self._idx2lbl: dict[int, str] = {}
         self._seq:  list[np.ndarray]  = []
         self._buf:  collections.deque = collections.deque(maxlen=STABLE_FRAMES)
         self._sentence: list[str]     = []
         self._last_word: str | None   = None
         self._last_hand_time: float   = 0.0
+        self._last_input_time: float  = time.time()
         self._build()
         self._load_model()
 
@@ -303,9 +300,11 @@ class TranslatorPage(ctk.CTkFrame):
         try:
             import tensorflow as tf
             self._model = tf.keras.models.load_model(MODEL_PATH)
+            self._model_mtime = os.path.getmtime(MODEL_PATH)
             with open(LABELS_PATH, 'r', encoding='utf-8') as f:
                 lmap = json.load(f)
             self._idx2lbl = {v: k for k, v in lmap.items()}
+            self._mode_seg.set(CAPTURE_TWO_HANDS)
             self._status.configure(
                 text=f">> MODEL OK  |  {len(self._idx2lbl)} labels", text_color=C_ACCENT)
         except Exception as e:
@@ -313,6 +312,11 @@ class TranslatorPage(ctk.CTkFrame):
 
     # ── 페이지 진입/이탈 ──────────────────────────────────────────────────────
     def on_activate(self):
+        if os.path.exists(MODEL_PATH):
+            model_mtime = os.path.getmtime(MODEL_PATH)
+            if self._model is None or self._model_mtime != model_mtime:
+                self._load_model()
+                self._clear()
         self._stop.clear()
         CameraWorker(self._q, self._stop,
                      capture_mode=self._mode_seg.get()).start()
@@ -322,6 +326,11 @@ class TranslatorPage(ctk.CTkFrame):
         self._stop.set()
 
     def _on_mode_change(self, value: str):
+        if self._model is not None and value != CAPTURE_TWO_HANDS:
+            self._mode_seg.set(CAPTURE_TWO_HANDS)
+            self._status.configure(text=">> 현재 모델은 [두 손] 모드 데이터로 학습됨",
+                                   text_color=C_WARN)
+            value = CAPTURE_TWO_HANDS
         self._stop.set()
         self.after(200, self._restart_worker)
 
@@ -347,9 +356,8 @@ class TranslatorPage(ctk.CTkFrame):
     def _infer(self, lm: np.ndarray, hand_detected: bool):
         if not hand_detected:
             self._seq.clear()
-            # 3초간 손 없으면 자동 CLR
-            if self._sentence and time.time() - self._last_hand_time > 3.0:
-                self._clear()
+            self._buf.clear()
+            self._clear_if_inactive()
             return
 
         self._last_hand_time = time.time()
@@ -358,6 +366,21 @@ class TranslatorPage(ctk.CTkFrame):
             self._seq.pop(0)
         if len(self._seq) < SEQUENCE_LENGTH:
             return
+
+        hands = np.asarray(self._seq, dtype=np.float32)[:, :126]
+        motion = float(np.mean(np.abs(np.diff(hands, axis=0))))
+        displacement = float(np.max(np.abs(hands[-1] - hands[0])))
+        if motion < MIN_GESTURE_MOTION and displacement < MIN_GESTURE_DISPLACEMENT:
+            self._buf.clear()
+            self._conf_bar.set(0)
+            self._conf_txt.configure(text="0%")
+            self._cur_lbl.configure(text="—")
+            self._status.configure(text=">> READY  |  손동작을 해주세요",
+                                   text_color=C_TEXT_DIM)
+            self._clear_if_inactive()
+            return
+
+        self._last_input_time = time.time()
 
         probs = self._model.predict(np.expand_dims(self._seq, 0), verbose=0)[0]
         conf  = float(np.max(probs))
@@ -372,13 +395,25 @@ class TranslatorPage(ctk.CTkFrame):
             confs = [p[1] for p in self._buf]
             if len(set(words)) == 1 and min(confs) >= PREDICTION_THRESHOLD:
                 w = words[0]
-                self._sentence.append(w)
-                self._last_word = w
+                if w != self._last_word:
+                    self._sentence.append(w)
+                    self._last_word = w
+                    self._refresh_box()
                 # 다음 동작 즉시 인식을 위해 버퍼·시퀀스 초기화
                 self._buf.clear()
                 self._seq.clear()
+                self._status.configure(text=">> 인식 완료  |  다음 동작 대기",
+                                       text_color=C_ACCENT)
                 self._cur_lbl.configure(text=w)
-                self._refresh_box()
+
+    def _clear_if_inactive(self):
+        if (
+            self._sentence
+            and time.time() - self._last_input_time >= INACTIVITY_CLEAR_SECONDS
+        ):
+            self._clear()
+            self._status.configure(text=">> AUTO CLR  |  입력 없음",
+                                   text_color=C_TEXT_DIM)
 
     def _refresh_box(self):
         text = ' '.join(self._sentence) or '—'
@@ -391,6 +426,7 @@ class TranslatorPage(ctk.CTkFrame):
         self._sentence.clear()
         self._last_word = None
         self._buf.clear()
+        self._last_input_time = time.time()
         self._cur_lbl.configure(text="—")
         self._refresh_box()
 
@@ -409,8 +445,10 @@ class TranslatorPage(ctk.CTkFrame):
 # ═══════════════════════════════════════════════════════════════════════════════
 class CollectorPage(ctk.CTkFrame):
     _IDLE       = 'IDLE'
+    _WAITING_HAND = 'WAITING_HAND'
     _COUNTDOWN  = 'COUNTDOWN'
     _RECORDING  = 'RECORDING'
+    _PAUSED     = 'PAUSED'
 
     def __init__(self, parent, app):
         super().__init__(parent, fg_color=C_BG, corner_radius=0)
@@ -422,6 +460,10 @@ class CollectorPage(ctk.CTkFrame):
         self._sequence:  list[np.ndarray] = []
         self._saved_count = 0
         self._labels: dict[str, int] = {}
+        self._paused = False  # 일시정지 플래그
+        self._pause_reason: str | None = None  # manual | no_hand
+        self._no_hand_count = 0  # 손 미인식 연속 프레임
+        self._max_no_hand_frames = 90  # 약 3초 (30fps * 3)
         self._build()
 
     def _build(self):
@@ -482,9 +524,25 @@ class CollectorPage(ctk.CTkFrame):
         self._state_lbl = _px_label(right, ">> IDLE", 12, C_TEXT_DIM, mono=True)
         self._state_lbl.pack(anchor="w", pady=(0, 12))
 
-        # 버튼
-        self._rec_btn = _px_btn(right, "[ REC ] 녹화 시작", self._on_record, 180, accent=True)
-        self._rec_btn.pack(anchor="w")
+        # 버튼 (행)
+        btn_row = ctk.CTkFrame(right, fg_color="transparent", corner_radius=0)
+        btn_row.pack(anchor="w", pady=(0, 6))
+        active_btn_row = ctk.CTkFrame(right, fg_color="transparent", corner_radius=0)
+        active_btn_row.pack(anchor="w", pady=(0, 0))
+
+        # REC 버튼
+        self._rec_btn = _px_btn(btn_row, "[ REC ] 녹화 시작", self._on_record, 180, accent=True)
+        self._rec_btn.pack(side="left", padx=(0, 8))
+
+        # 일시정지 버튼 (처음엔 숨김)
+        self._pause_btn = _px_btn(active_btn_row, "[ ⏸ ] 일시정지", self._on_pause, 140, warn=False)
+        self._pause_btn.pack(side="left", padx=(0, 8))
+        self._pause_btn.pack_forget()  # 초기 숨김
+
+        # 현재 시퀀스 취소 버튼 (처음엔 숨김)
+        self._cancel_btn = _px_btn(active_btn_row, "[ X ] 취소", self._on_cancel_sequence, 120, warn=True)
+        self._cancel_btn.pack(side="left")
+        self._cancel_btn.pack_forget()
 
     # ── 레이블 파일 로드/저장 ─────────────────────────────────────────────────
     def _load_labels(self):
@@ -545,17 +603,65 @@ class CollectorPage(ctk.CTkFrame):
 
         self._start_next_sequence()
 
+    def _on_pause(self):
+        """일시정지/재개 토글"""
+        if self._state == self._RECORDING:
+            if not self._paused:
+                # 일시정지로 변경
+                self._paused = True
+                self._pause_reason = "manual"
+                self._state_lbl.configure(text=">> PAUSED", text_color=C_WARN)
+                self._pause_btn.configure(text="[ ▶ ] 재개")
+                self._cam.set_overlay("⏸", C_WARN)
+            else:
+                # 재개
+                self._paused = False
+                self._pause_reason = None
+                self._no_hand_count = 0
+                self._state_lbl.configure(text=">> RECORDING...", text_color=C_ERROR)
+                self._pause_btn.configure(text="[ ⏸ ] 일시정지")
+                self._cam.set_overlay("●", C_ERROR)
+
+    def _on_cancel_sequence(self):
+        """현재 시퀀스의 임시 프레임을 버리고 같은 번호를 다시 시도."""
+        if self._state not in (self._WAITING_HAND, self._COUNTDOWN, self._RECORDING):
+            return
+        self._sequence = []
+        self._paused = False
+        self._pause_reason = None
+        self._no_hand_count = 0
+        self._prog_bar.set(self._saved_count / self._target)
+        self._prog_txt.configure(text=f"{self._saved_count} / {self._target}")
+        self._state_lbl.configure(text=">> CANCELED - RETRY", text_color=C_WARN)
+        self._cam.set_overlay("X", C_WARN)
+        self._state = self._IDLE
+        self._pause_btn.configure(text="[ ⏸ ] 일시정지")
+        self.after(500, self._start_next_sequence)
+
     def _start_next_sequence(self):
         if self._saved_count >= self._target:
             self._state = self._IDLE
+            self._paused = False
+            self._pause_reason = None
+            self._no_hand_count = 0
             self._state_lbl.configure(text=f">> DONE  {self._saved_count} sequences saved",
                                       text_color=C_ACCENT)
             self._cam.set_overlay("")
             self._rec_btn.configure(state="normal")
+            self._pause_btn.pack_forget()  # 일시정지 버튼 숨김
+            self._cancel_btn.pack_forget()
             return
-        self._state = self._COUNTDOWN
-        self._cd_start = time.time()
+        self._state = self._WAITING_HAND
+        self._paused = False
+        self._pause_reason = None
+        self._no_hand_count = 0
+        self._sequence = []
         self._rec_btn.configure(state="disabled")
+        self._pause_btn.pack(side="left", padx=(0, 8))  # 일시정지 버튼 표시
+        self._cancel_btn.pack(side="left")
+        self._pause_btn.configure(text="[ ⏸ ] 일시정지")
+        self._cam.set_overlay("?")
+        self._state_lbl.configure(text=">> WAITING FOR HAND", text_color=C_WARN)
 
     def _save_sequence(self):
         label_dir = os.path.join(DATA_DIR, self._current_label)
@@ -579,6 +685,9 @@ class CollectorPage(ctk.CTkFrame):
             if rem <= 0:
                 self._state = self._RECORDING
                 self._sequence = []
+                self._no_hand_count = 0
+                self._paused = False
+                self._pause_reason = None
                 self._cam.set_overlay("●", C_ERROR)
                 self._state_lbl.configure(text=">> RECORDING...", text_color=C_ERROR)
             else:
@@ -590,15 +699,85 @@ class CollectorPage(ctk.CTkFrame):
             frame_rgb, lm, hand_detected = self._q.get_nowait()
             self._cam.update_frame(frame_rgb)
 
+            # 각 시퀀스는 손이 처음 감지된 뒤 3초 카운트다운을 시작한다.
+            if self._state == self._WAITING_HAND:
+                if hand_detected:
+                    self._state = self._COUNTDOWN
+                    self._cd_start = time.time()
+                    self._cam.set_overlay("3", C_WARN)
+                    self._state_lbl.configure(text=">> HAND DETECTED - COUNTDOWN",
+                                              text_color=C_WARN)
+                else:
+                    self._cam.set_overlay("?")
+                    self._state_lbl.configure(text=">> WAITING FOR HAND",
+                                              text_color=C_WARN)
+
+            elif self._state == self._COUNTDOWN and not hand_detected:
+                self._state = self._WAITING_HAND
+                self._cam.set_overlay("?")
+                self._state_lbl.configure(text=">> WAITING FOR HAND",
+                                          text_color=C_WARN)
+
+            # 녹화 중일 때 (일시정지 상태 포함)
             if self._state == self._RECORDING:
-                self._sequence.append(lm)
-                pct = len(self._sequence) / SEQUENCE_LENGTH
-                self._prog_bar.set(self._saved_count / self._target +
-                                   pct / self._target)
+                if self._paused and self._pause_reason == "manual":
+                    self._state_lbl.configure(text=">> PAUSED", text_color=C_WARN)
+                    self._cam.set_overlay("⏸", C_WARN)
+                    self.after(30, self._update)
+                    return
+
+                # 손 인식 상태 추적
+                if hand_detected:
+                    # 손이 감지됨 - 카운터 초기화
+                    if self._paused and self._pause_reason == "no_hand":
+                        # 일시정지 상태였는데 손이 다시 감지됨 → 재개
+                        self._paused = False
+                        self._pause_reason = None
+                        self._state_lbl.configure(text=">> RECORDING...", text_color=C_ERROR)
+                        self._cam.set_overlay("●", C_ERROR)
+                    
+                    self._no_hand_count = 0
+
+                else:
+                    # 손이 감지되지 않음 - 카운터 증가
+                    self._no_hand_count += 1
+                    
+                    # 손이 없는 첫 순간 (일시정지 시작)
+                    if self._no_hand_count == 1:
+                        self._paused = True
+                        self._pause_reason = "no_hand"
+                        self._state_lbl.configure(text=">> PAUSED (손 미인식)", text_color=C_WARN)
+                        self._cam.set_overlay("⏸", C_WARN)
+                    
+                    # 90프레임 이상 손이 없으면 조기 종료
+                    if self._no_hand_count >= self._max_no_hand_frames:
+                        self._sequence = []
+                        self._prog_bar.set(self._saved_count / self._target)
+                        self._prog_txt.configure(text=f"{self._saved_count} / {self._target}")
+                        self._cam.set_overlay("X", C_WARN)
+                        self._state_lbl.configure(text=">> CANCELED (손 미인식)", text_color=C_WARN)
+                        self._state = self._IDLE
+                        self._paused = False
+                        self._pause_reason = None
+                        self._pause_btn.configure(text="[ ⏸ ] 일시정지")
+                        self.after(500, self._start_next_sequence)
+                        return
+
+                # 일시정지 상태가 아닐 때만 프레임 저장
+                if not self._paused:
+                    self._sequence.append(lm)
+                    pct = len(self._sequence) / SEQUENCE_LENGTH
+                    self._prog_bar.set(self._saved_count / self._target +
+                                       pct / self._target)
+
+                # 정상 완료: SEQUENCE_LENGTH에 도달
                 if len(self._sequence) >= SEQUENCE_LENGTH:
                     self._save_sequence()
                     self._cam.set_overlay("OK", C_ACCENT)
                     self._state = self._IDLE
+                    self._paused = False
+                    self._pause_reason = None
+                    self._pause_btn.configure(text="[ ⏸ ] 일시정지")
                     self.after(500, self._start_next_sequence)
 
         except queue.Empty:
@@ -772,14 +951,34 @@ class TrainerPage(ctk.CTkFrame):
 
         lines = []
         total = 0
+        valid_total = 0
         for name in sorted(labels):
             d = os.path.join(DATA_DIR, name)
-            n = len([f for f in os.listdir(d) if f.endswith('.npy')]) if os.path.isdir(d) else 0
+            n = 0
+            valid = 0
+            bad = 0
+            if os.path.isdir(d):
+                for fname in os.listdir(d):
+                    if not fname.endswith('.npy'):
+                        continue
+                    n += 1
+                    try:
+                        seq = np.load(os.path.join(d, fname), mmap_mode='r')
+                        if seq.shape == (SEQUENCE_LENGTH, NUM_FEATURES):
+                            valid += 1
+                        else:
+                            bad += 1
+                    except Exception:
+                        bad += 1
             total += n
-            status = "OK" if n >= 30 else "LOW"
-            lines.append(f"  [{status:3s}]  {name:<20s}  {n:3d} seqs")
+            valid_total += valid
+            status = "OK" if valid >= 30 else ("LOW" if valid >= 2 else "BAD")
+            suffix = f"  ({bad} bad)" if bad else ""
+            lines.append(f"  [{status:3s}]  {name:<20s}  {valid:3d}/{n:<3d} valid{suffix}")
 
-        lines.append(f"\n  TOTAL: {len(labels)} labels  |  {total} sequences")
+        lines.append(f"\n  TOTAL: {len(labels)} labels  |  {valid_total}/{total} valid sequences")
+        if sum(1 for line in lines if line.startswith("  [OK ") or line.startswith("  [LOW")) < 2:
+            lines.append("  학습 필요: 유효 시퀀스 2개 이상인 레이블이 최소 2개 필요")
         self._stats_lbl.configure(text="\n".join(lines))
 
     def _run(self):

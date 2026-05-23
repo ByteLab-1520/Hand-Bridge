@@ -22,6 +22,7 @@ from config import (
     CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT,
     SEQUENCE_LENGTH, NUM_FEATURES,
     PREDICTION_THRESHOLD, STABLE_FRAMES,
+    MIN_GESTURE_MOTION, MIN_GESTURE_DISPLACEMENT, INACTIVITY_CLEAR_SECONDS,
     MODEL_PATH, LABELS_PATH,
 )
 from utils import extract_landmarks, draw_landmarks, put_korean_text, HolisticDetector
@@ -58,21 +59,52 @@ class Translator:
         self.last_prediction: str | None = None
         self.stable_count: int = 0
         self.last_added_word: str | None = None
+        self.last_hand_time: float = time.time()  # 손 감지 타임스탬프
+        self.last_input_time: float = time.time()
 
         # Smoothing: keep last few frame-level predictions
         self.pred_queue: collections.deque = collections.deque(maxlen=STABLE_FRAMES)
 
-    def process_frame(self, landmarks: np.ndarray) -> tuple[str | None, float]:
+    def _gesture_has_motion(self) -> bool:
+        hands = np.asarray(self.sequence, dtype=np.float32)[:, :126]
+        motion = float(np.mean(np.abs(np.diff(hands, axis=0))))
+        displacement = float(np.max(np.abs(hands[-1] - hands[0])))
+        return (
+            motion >= MIN_GESTURE_MOTION
+            or displacement >= MIN_GESTURE_DISPLACEMENT
+        )
+
+    def process_frame(self, landmarks: np.ndarray, hand_detected: bool = True) -> tuple[str | None, float]:
         """
         Feed one frame of landmarks. Returns (predicted_label, confidence)
         when a stable prediction crosses the threshold, else (None, 0.0).
+        
+        Args:
+            landmarks: 추출된 랜드마크 배열
+            hand_detected: 손이 감지되었는지 여부
         """
+        # 손이 감지되지 않으면
+        if not hand_detected:
+            self.sequence.clear()
+            self.pred_queue.clear()
+            self.clear_if_inactive()
+            return None, 0.0
+        
+        self.last_hand_time = time.time()
+        
         self.sequence.append(landmarks)
         if len(self.sequence) > SEQUENCE_LENGTH:
             self.sequence.pop(0)
 
         if len(self.sequence) < SEQUENCE_LENGTH:
             return None, 0.0
+
+        if not self._gesture_has_motion():
+            self.pred_queue.clear()
+            self.clear_if_inactive()
+            return None, 0.0
+
+        self.last_input_time = time.time()
 
         seq_input = np.expand_dims(self.sequence, axis=0)  # (1, 30, 126)
         probs = self.model.predict(seq_input, verbose=0)[0]
@@ -98,6 +130,8 @@ class Translator:
                 self.sentence.append(stable_label)
                 self.last_added_word = stable_label
                 self.pred_queue.clear()
+                # 새로운 동작을 빠르게 인식하기 위해 시퀀스 초기화
+                self.sequence.clear()
                 return stable_label, avg_conf
 
         return None, conf
@@ -106,6 +140,14 @@ class Translator:
         self.sentence.clear()
         self.last_added_word = None
         self.pred_queue.clear()
+        self.last_input_time = time.time()
+
+    def clear_if_inactive(self):
+        if (
+            self.sentence
+            and time.time() - self.last_input_time >= INACTIVITY_CLEAR_SECONDS
+        ):
+            self.clear_sentence()
 
     def get_sentence(self) -> str:
         return ' '.join(self.sentence)
@@ -197,7 +239,7 @@ def main() -> None:
         frame = draw_landmarks(frame, results)
         landmarks = extract_landmarks(results)
 
-        _, current_conf = translator.process_frame(landmarks)
+        _, current_conf = translator.process_frame(landmarks, hand_detected=results.hand_detected)
 
         # FPS
         now = time.time()
