@@ -1,0 +1,9 @@
+# Reproducible Windows presentation environment (validated with Python 3.12).
+mediapipe==1.0.1
+opencv-contrib-python==5.0.0.93
+numpy==2.5.3
+tensorflow-cpu==2.21.0
+Pillow==12.3.0
+scikit-learn==1.9.1
+matplotlib==3.11.2
+customtkinter==6.0.0

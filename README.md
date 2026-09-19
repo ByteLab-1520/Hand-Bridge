@@ -62,13 +62,31 @@ It runs **entirely on your machine** — no internet, no cloud API, no GPU neede
 ### 1. Clone & Setup
 
 ```bash
-git clone https://github.com/your-username/hand-bridge.git
+git clone https://github.com/ByteLab-1520/Hand-Bridge.git
 cd hand-bridge
 
 python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 
 pip install -r requirements.txt
+```
+
+### Windows presentation setup
+
+Install 64-bit Python 3.12 from python.org, then run once in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
+```
+
+After setup, double-click `run_windows.bat` to start the GUI without a console
+window. The pinned `requirements-windows.txt` keeps the presentation machine on
+the versions verified for this project.
+
+Before the presentation, run the hardware/model preflight once:
+
+```powershell
+.\.venv\Scripts\python.exe .\preflight_windows.py
 ```
 
 ### 2. Add Training Videos

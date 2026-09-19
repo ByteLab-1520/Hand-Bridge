@@ -30,7 +30,7 @@ from config import (
     CAPTURE_MODES, DEFAULT_CAPTURE_MODE,
     CAPTURE_TWO_HANDS, CAPTURE_WITH_FACE, CAPTURE_WITH_BODY, CAPTURE_ONE_HAND,
 )
-from utils import extract_landmarks, draw_landmarks, HolisticDetector
+from utils import extract_landmarks, draw_landmarks, HolisticDetector, open_camera
 
 # ── 60-30-10 색상 규칙 ────────────────────────────────────────────────────────
 # 60%  지배색 (배경, 대형 표면)   → 딥 다크 네이비
@@ -142,10 +142,24 @@ class CameraWorker(threading.Thread):
         self.capture_mode = capture_mode
 
     def run(self):
+        cap = open_camera(CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT)
+
+        # Show a live preview immediately while MediaPipe initializes.
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                frame = cv2.flip(frame, 1)
+                disp = cv2.cvtColor(
+                    cv2.resize(frame, (CAM_W, CAM_H)), cv2.COLOR_BGR2RGB
+                )
+                try:
+                    self.out_q.put_nowait(
+                        (disp, np.zeros(NUM_FEATURES, dtype=np.float32), False)
+                    )
+                except queue.Full:
+                    pass
+
         detector = HolisticDetector(capture_mode=self.capture_mode)
-        cap = cv2.VideoCapture(CAMERA_INDEX)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
         while not self.stop_evt.is_set():
             ret, frame = cap.read()
@@ -224,6 +238,7 @@ class TranslatorPage(ctk.CTkFrame):
         self._q: queue.Queue   = queue.Queue(maxsize=2)
         self._stop = threading.Event()
         self._model = None
+        self._infer_fn = None
         self._model_mtime: float | None = None
         self._idx2lbl: dict[int, str] = {}
         self._seq:  list[np.ndarray]  = []
@@ -299,7 +314,9 @@ class TranslatorPage(ctk.CTkFrame):
             return
         try:
             import tensorflow as tf
+            from model import make_inference_fn
             self._model = tf.keras.models.load_model(MODEL_PATH)
+            self._infer_fn = make_inference_fn(self._model)
             self._model_mtime = os.path.getmtime(MODEL_PATH)
             with open(LABELS_PATH, 'r', encoding='utf-8') as f:
                 lmap = json.load(f)
@@ -382,7 +399,8 @@ class TranslatorPage(ctk.CTkFrame):
 
         self._last_input_time = time.time()
 
-        probs = self._model.predict(np.expand_dims(self._seq, 0), verbose=0)[0]
+        batch = np.asarray(self._seq, dtype=np.float32)[None, ...]
+        probs = self._infer_fn(batch).numpy()[0]
         conf  = float(np.max(probs))
         word  = self._idx2lbl.get(int(np.argmax(probs)), '?')
 
@@ -1055,7 +1073,14 @@ class App(ctk.CTk):
         self._pages: dict[str, ctk.CTkFrame] = {}
 
         self._build_header()
+        loading = _px_label(
+            self, "모델을 불러오는 중입니다...", 18, C_ACCENT, mono=False
+        )
+        loading.pack(expand=True)
+        # Paint a useful startup screen before TensorFlow/model initialization.
+        self.update()
         self._build_body()
+        loading.destroy()
         self.show_page("translator")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 

@@ -25,7 +25,8 @@ from config import (
     MIN_GESTURE_MOTION, MIN_GESTURE_DISPLACEMENT, INACTIVITY_CLEAR_SECONDS,
     MODEL_PATH, LABELS_PATH,
 )
-from utils import extract_landmarks, draw_landmarks, put_korean_text, HolisticDetector
+from utils import extract_landmarks, draw_landmarks, put_korean_text, HolisticDetector, open_camera
+from model import make_inference_fn, run_inference
 
 
 def load_model_and_labels():
@@ -52,6 +53,7 @@ def load_model_and_labels():
 class Translator:
     def __init__(self, model, idx_to_label: dict[int, str]):
         self.model = model
+        self.infer = make_inference_fn(model)
         self.idx_to_label = idx_to_label
 
         self.sequence: list[np.ndarray] = []
@@ -106,8 +108,7 @@ class Translator:
 
         self.last_input_time = time.time()
 
-        seq_input = np.expand_dims(self.sequence, axis=0)  # (1, 30, 126)
-        probs = self.model.predict(seq_input, verbose=0)[0]
+        probs = run_inference(self.infer, self.sequence)
         conf = float(np.max(probs))
         pred_idx = int(np.argmax(probs))
         pred_label = self.idx_to_label.get(pred_idx, '?')
@@ -212,9 +213,7 @@ def main() -> None:
 
     hands = HolisticDetector()
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap = open_camera(CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT)
 
     if not cap.isOpened():
         print("[ERROR] 카메라를 열 수 없습니다. config.py의 CAMERA_INDEX를 확인하세요.")

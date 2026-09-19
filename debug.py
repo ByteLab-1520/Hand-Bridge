@@ -23,7 +23,7 @@ from config import (
     CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT,
     KEY_FACE_INDICES, NUM_KEY_FACE, POSE_INDICES, NUM_KEY_POSE,
 )
-from utils import put_korean_text, HolisticDetector
+from utils import put_korean_text, HolisticDetector, open_camera
 
 # ── 색상 ──────────────────────────────────────────────────────────────────────
 C_GREEN  = (0, 255, 100)
@@ -124,7 +124,7 @@ def main():
     # HolisticDetector가 모델 다운로드 + 초기화를 모두 처리
     detector = HolisticDetector()
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
+    cap = open_camera(CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 

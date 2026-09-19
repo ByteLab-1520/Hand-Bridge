@@ -29,7 +29,8 @@ from config import (
     PREDICTION_THRESHOLD, STABLE_FRAMES,
     MODEL_PATH, LABELS_PATH,
 )
-from utils import extract_landmarks, draw_landmarks, put_korean_text, HolisticDetector
+from utils import extract_landmarks, draw_landmarks, put_korean_text, HolisticDetector, open_camera
+from model import make_inference_fn, run_inference
 
 CONFIG_FILE = "gesture_config.json"
 LOG_FILE = "gesture_log.txt"
@@ -108,6 +109,7 @@ class GestureRecognizer:
     
     def __init__(self, model, idx_to_label, config):
         self.model = model
+        self.infer = make_inference_fn(model)
         self.idx_to_label = idx_to_label
         self.config = config
         
@@ -146,8 +148,7 @@ class GestureRecognizer:
             return None, 0.0
         
         # 모델 예측
-        seq_input = np.expand_dims(self.sequence, axis=0)
-        probs = self.model.predict(seq_input, verbose=0)[0]
+        probs = run_inference(self.infer, self.sequence)
         conf = float(np.max(probs))
         pred_idx = int(np.argmax(probs))
         pred_label = self.idx_to_label.get(pred_idx, '?')
@@ -307,9 +308,7 @@ def main():
     recognizer = GestureRecognizer(model, idx_to_label, config)
     detector = HolisticDetector()
     
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap = open_camera(CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT)
     
     if not cap.isOpened():
         log("[ERROR] 카메라를 열 수 없습니다.")

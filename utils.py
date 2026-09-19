@@ -23,6 +23,35 @@ from config import (
     CAPTURE_TWO_HANDS, CAPTURE_WITH_FACE, CAPTURE_WITH_BODY, CAPTURE_ONE_HAND,
 )
 
+
+def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
+    """Open a webcam with a backend that is reliable in worker threads.
+
+    Media Foundation can stall when opened from a background thread on some
+    Windows systems.  DirectShow avoids that failure mode; MSMF remains the
+    fallback for cameras that do not expose a DirectShow interface.
+    """
+    if platform.system() == "Windows":
+        backends = (cv2.CAP_DSHOW, cv2.CAP_MSMF)
+    else:
+        backends = (cv2.CAP_ANY,)
+
+    camera = None
+    for backend in backends:
+        candidate = cv2.VideoCapture(index, backend)
+        if candidate.isOpened():
+            camera = candidate
+            break
+        candidate.release()
+
+    if camera is None:
+        camera = cv2.VideoCapture(index)
+
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return camera
+
 # ── Korean font ────────────────────────────────────────────────────────────────
 
 def _find_korean_font() -> str | None:

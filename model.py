@@ -39,6 +39,32 @@ def build_model(num_classes: int) -> tf.keras.Model:
     return model
 
 
+def make_inference_fn(model: tf.keras.Model):
+    """Compile a low-overhead inference path for the real-time loops.
+
+    ``Model.predict`` builds an input pipeline for every call and is much slower
+    for a single 30-frame sample.  A traced function keeps that setup out of the
+    camera loop while producing the same softmax probabilities.
+    """
+    input_spec = tf.TensorSpec(
+        shape=(None, SEQUENCE_LENGTH, NUM_FEATURES), dtype=tf.float32
+    )
+
+    @tf.function(input_signature=[input_spec])
+    def infer(batch):
+        return model(batch, training=False)
+
+    # Trace once during model loading instead of on the first live gesture.
+    infer.get_concrete_function()
+    return infer
+
+
+def run_inference(infer, sequence) -> np.ndarray:
+    """Return probabilities for one landmark sequence as a NumPy vector."""
+    batch = np.asarray(sequence, dtype=np.float32)[None, ...]
+    return infer(batch).numpy()[0]
+
+
 def get_callbacks() -> list:
     return [
         callbacks.EarlyStopping(

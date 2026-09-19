@@ -22,7 +22,7 @@ from config import (
     SEQUENCE_LENGTH, NUM_SEQUENCES,
     DATA_DIR,
 )
-from utils import extract_landmarks, draw_landmarks, put_korean_text, HolisticDetector
+from utils import extract_landmarks, draw_landmarks, put_korean_text, HolisticDetector, open_camera
 
 
 def load_labels() -> dict[str, int]:
@@ -249,9 +249,7 @@ def collect_sequences(
 def main() -> None:
     detector = HolisticDetector()
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap = open_camera(CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT)
 
     if not cap.isOpened():
         print("[ERROR] Cannot open camera. Check CAMERA_INDEX in config.py")
