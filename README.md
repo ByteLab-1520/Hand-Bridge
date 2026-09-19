@@ -89,6 +89,10 @@ Before the presentation, run the hardware/model preflight once:
 .\.venv\Scripts\python.exe .\preflight_windows.py
 ```
 
+For the complete problem analysis, file-by-file changes, measured performance,
+verification results, and remaining limitations, see
+[`WINDOWS_RENEWAL_NOTES.md`](WINDOWS_RENEWAL_NOTES.md).
+
 ### 2. Add Training Videos
 
 Organize your `.mp4` / `.mov` files by word:
